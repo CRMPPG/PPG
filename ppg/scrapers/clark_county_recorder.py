@@ -1,10 +1,9 @@
-"""Clark County NV Recorder scraper using Selenium.
+"""Clark County NV Recorder scraper using requests + BeautifulSoup.
 
 Scrapes the AcclaimWeb system at recorderecomm.clarkcountynv.gov for
 recorded documents (Notices of Default, Lis Pendens, Liens, Trustee Sales).
 
-Uses Selenium because AcclaimWeb generates JS-based hash+timestamp
-parameters for anti-scraping protection.
+Uses requests with session cookies instead of Selenium for portability.
 """
 
 import random
@@ -12,15 +11,11 @@ import re
 import time
 from datetime import datetime
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+import requests
+from bs4 import BeautifulSoup
 
 from ppg.scrapers.recorder_base import BaseRecorderScraper
+from ppg.utils.http import ScraperSession
 
 # Standard Clark County: XXX-XX-XXX-XXX (e.g. 179-34-712-030)
 PARCEL_STANDARD = re.compile(r"^(\d{3})-?(\d{2})-?(\d{3})-?(\d{3})$")
@@ -65,46 +60,50 @@ def normalize_parcel(raw: str) -> str | None:
 
 
 class ClarkCountyRecorderScraper(BaseRecorderScraper):
-    """Scrape Clark County NV Recorder (AcclaimWeb) for recorded documents."""
+    """Scrape Clark County NV Recorder (AcclaimWeb) for recorded documents.
+
+    Uses requests + BeautifulSoup instead of Selenium for portability.
+    """
 
     county_name = "Clark"
     state = "NV"
     base_url = "https://recorderecomm.clarkcountynv.gov/AcclaimWeb"
 
     SEARCH_URL = f"{base_url}/Search/SearchTypeParcel"
+    NAME_SEARCH_URL = f"{base_url}/Search/SearchTypeName"
 
-    def __init__(self, headless=True, delay_seconds=3, timeout=20):
-        self.headless = headless
+    def __init__(self, headless=True, delay_seconds=3, timeout=30):
         self.delay_seconds = delay_seconds
         self.timeout = timeout
-        self._driver = None
+        self._session = None
+        # headless kept for API compatibility but not used (no browser)
 
-    def _get_driver(self):
-        """Initialize a Selenium Chrome driver."""
-        if self._driver is not None:
-            return self._driver
+    def _get_session(self) -> requests.Session:
+        """Initialize an HTTP session with proper headers."""
+        if self._session is not None:
+            return self._session
 
-        options = Options()
-        if self.headless:
-            options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument(
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        # Reduce automation detection
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
+        self._session = requests.Session()
+        self._session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+        })
 
-        self._driver = webdriver.Chrome(options=options)
-        self._driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
-        )
-        return self._driver
+        # Visit the base URL first to get session cookies
+        try:
+            resp = self._session.get(self.base_url, timeout=self.timeout)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"  Warning: could not initialize session: {e}")
+
+        return self._session
 
     def _rate_limit(self):
         """Wait between requests with jitter."""
@@ -121,169 +120,217 @@ class ClarkCountyRecorderScraper(BaseRecorderScraper):
         if not normalized:
             raise ValueError(f"Invalid Clark County parcel format: {parcel_number}")
 
-        driver = self._get_driver()
+        session = self._get_session()
         self._rate_limit()
 
-        # Navigate to parcel search page (lets JS generate hash/timestamp)
-        driver.get(self.SEARCH_URL)
-        wait = WebDriverWait(driver, self.timeout)
+        # Load the search page to get any hidden form fields / tokens
+        try:
+            page_resp = session.get(self.SEARCH_URL, timeout=self.timeout)
+            page_resp.raise_for_status()
+        except Exception as e:
+            print(f"  Warning: could not load search page: {e}")
+            return []
 
-        # Wait for and fill the parcel number input
-        parcel_input = self._find_parcel_input(wait)
-        parcel_input.clear()
-        parcel_input.send_keys(normalized)
+        soup = BeautifulSoup(page_resp.text, "lxml")
 
-        # Submit the search
-        self._submit_search(driver, wait)
+        # Extract form fields (hidden inputs like __RequestVerificationToken)
+        form_data = self._extract_form_data(soup)
+        form_data.update(self._build_parcel_form_data(soup, normalized))
 
-        # Wait for results
-        time.sleep(2)
+        # Determine form action URL
+        form_action = self._get_form_action(soup, self.SEARCH_URL)
 
-        # Parse all result pages
-        all_docs = []
-        all_docs.extend(self._parse_results_page(driver))
+        # Submit search
+        self._rate_limit()
+        try:
+            search_resp = session.post(
+                form_action,
+                data=form_data,
+                timeout=self.timeout,
+                headers={"Referer": self.SEARCH_URL},
+            )
+            search_resp.raise_for_status()
+        except Exception as e:
+            print(f"  Warning: search request failed: {e}")
+            return []
+
+        # Parse results
+        results_soup = BeautifulSoup(search_resp.text, "lxml")
+        all_docs = self._parse_results_page(results_soup)
 
         # Handle pagination
-        while self._has_next_page(driver):
-            self._click_next_page(driver)
-            time.sleep(1.5)
-            all_docs.extend(self._parse_results_page(driver))
+        page_num = 1
+        while True:
+            next_url = self._get_next_page_url(results_soup)
+            if not next_url:
+                break
+            page_num += 1
+            self._rate_limit()
+            try:
+                next_resp = session.get(next_url, timeout=self.timeout)
+                next_resp.raise_for_status()
+                results_soup = BeautifulSoup(next_resp.text, "lxml")
+                page_docs = self._parse_results_page(results_soup)
+                if not page_docs:
+                    break
+                all_docs.extend(page_docs)
+            except Exception:
+                break
 
         return all_docs
 
     def search_by_name(self, name: str) -> list[dict]:
         """Search recorded documents by party name."""
-        driver = self._get_driver()
+        session = self._get_session()
         self._rate_limit()
 
-        name_search_url = f"{self.base_url}/Search/SearchTypeName"
-        driver.get(name_search_url)
-        wait = WebDriverWait(driver, self.timeout)
-
-        # Look for name input fields
         try:
-            name_input = wait.until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "input[id*='Name'], input[name*='name'], input[id*='Party']")
-                )
-            )
-            name_input.clear()
-            name_input.send_keys(name)
-            self._submit_search(driver, wait)
-            time.sleep(2)
-            return self._parse_results_page(driver)
+            page_resp = session.get(self.NAME_SEARCH_URL, timeout=self.timeout)
+            page_resp.raise_for_status()
         except Exception:
             return []
 
-    def _find_parcel_input(self, wait: WebDriverWait):
-        """Find the parcel number input field on the search page."""
-        selectors = [
-            "input[id*='arcel']",
-            "input[name*='arcel']",
-            "input[id*='Parcel']",
-            "input[name*='Parcel']",
-            "input[id*='APN']",
-            "input[type='text']",
-        ]
-        for selector in selectors:
-            try:
-                el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                return el
-            except Exception:
-                continue
-        raise RuntimeError("Could not find parcel number input on search page")
+        soup = BeautifulSoup(page_resp.text, "lxml")
+        form_data = self._extract_form_data(soup)
 
-    def _submit_search(self, driver, wait: WebDriverWait):
-        """Submit the search form."""
-        # Try clicking a search button
-        button_selectors = [
-            "button[type='submit']",
-            "input[type='submit']",
-            "button[id*='earch']",
-            "a[id*='earch']",
-            ".btn-search",
-            "#btnSearch",
-        ]
-        for selector in button_selectors:
-            try:
-                btn = driver.find_element(By.CSS_SELECTOR, selector)
-                btn.click()
-                return
-            except Exception:
-                continue
+        # Find name input fields and populate
+        name_inputs = soup.find_all("input", attrs={
+            "type": "text",
+            "id": re.compile(r"(name|party)", re.I),
+        })
+        if not name_inputs:
+            name_inputs = soup.find_all("input", attrs={"type": "text"})
 
-        # Fallback: press Enter on the active element
-        driver.switch_to.active_element.send_keys(Keys.RETURN)
+        if name_inputs:
+            form_data[name_inputs[0].get("name", "Name")] = name
 
-    def _parse_results_page(self, driver) -> list[dict]:
-        """Parse the current results page for document records."""
+        form_action = self._get_form_action(soup, self.NAME_SEARCH_URL)
+
+        self._rate_limit()
+        try:
+            resp = session.post(
+                form_action,
+                data=form_data,
+                timeout=self.timeout,
+                headers={"Referer": self.NAME_SEARCH_URL},
+            )
+            resp.raise_for_status()
+            return self._parse_results_page(BeautifulSoup(resp.text, "lxml"))
+        except Exception:
+            return []
+
+    def _extract_form_data(self, soup: BeautifulSoup) -> dict:
+        """Extract hidden form fields (CSRF tokens, etc.)."""
+        data = {}
+        form = soup.find("form")
+        if form:
+            for hidden in form.find_all("input", attrs={"type": "hidden"}):
+                name = hidden.get("name")
+                if name:
+                    data[name] = hidden.get("value", "")
+        return data
+
+    def _build_parcel_form_data(self, soup: BeautifulSoup, parcel: str) -> dict:
+        """Build the form data dict for a parcel search."""
+        data = {}
+
+        # Find parcel input by ID or name patterns
+        parcel_input = (
+            soup.find("input", attrs={"id": re.compile(r"arcel|APN", re.I)})
+            or soup.find("input", attrs={"name": re.compile(r"arcel|APN", re.I)})
+        )
+
+        if parcel_input:
+            data[parcel_input.get("name", "ParcelNumber")] = parcel
+        else:
+            # Fallback: find all text inputs and use the first one
+            text_inputs = soup.find_all("input", attrs={"type": "text"})
+            if text_inputs:
+                data[text_inputs[0].get("name", "ParcelNumber")] = parcel
+            else:
+                data["ParcelNumber"] = parcel
+
+        return data
+
+    def _get_form_action(self, soup: BeautifulSoup, fallback_url: str) -> str:
+        """Get the form's action URL."""
+        form = soup.find("form")
+        if form and form.get("action"):
+            action = form["action"]
+            if action.startswith("http"):
+                return action
+            if action.startswith("/"):
+                return f"https://recorderecomm.clarkcountynv.gov{action}"
+            return f"{self.base_url}/{action}"
+        return fallback_url
+
+    def _parse_results_page(self, soup: BeautifulSoup) -> list[dict]:
+        """Parse the results page for document records."""
         docs = []
 
-        # AcclaimWeb typically renders results in a table or grid
-        # Try multiple strategies to find results
+        # Strategy 1: Look for result tables
+        tables = soup.find_all("table")
+        for table in tables:
+            rows = table.find_all("tr")
+            if len(rows) < 2:
+                continue
 
-        # Strategy 1: Look for result table rows
-        try:
-            rows = driver.find_elements(
-                By.CSS_SELECTOR,
-                "table.SearchResults tr, .search-results tr, "
-                "#SearchResultsGrid tr, .grid tr, table[role='grid'] tr, "
-                "#searchResultsTable tr, .result-row"
-            )
-            if rows:
-                headers = self._extract_headers(rows[0]) if rows else []
-                for row in rows[1:]:
-                    cells = row.find_elements(By.TAG_NAME, "td")
-                    if cells:
-                        doc = self._map_cells_to_doc(headers, cells)
-                        if doc.get("document_type"):
-                            docs.append(doc)
-                return docs
-        except Exception:
-            pass
+            headers = [
+                th.get_text(strip=True).lower()
+                for th in rows[0].find_all(["th", "td"])
+            ]
 
-        # Strategy 2: Look for any table on the page
-        try:
-            tables = driver.find_elements(By.TAG_NAME, "table")
-            for table in tables:
-                rows = table.find_elements(By.TAG_NAME, "tr")
-                if len(rows) < 2:
-                    continue
-                headers = self._extract_headers(rows[0])
-                for row in rows[1:]:
-                    cells = row.find_elements(By.TAG_NAME, "td")
-                    if cells:
-                        doc = self._map_cells_to_doc(headers, cells)
-                        if doc.get("document_type") or doc.get("instrument_number"):
-                            docs.append(doc)
-                if docs:
-                    return docs
-        except Exception:
-            pass
+            # Check if this looks like a results table
+            header_text = " ".join(headers)
+            if not any(
+                kw in header_text
+                for kw in ["type", "instrument", "date", "record", "doc", "grantor"]
+            ):
+                continue
 
-        # Strategy 3: Look for div-based result rows
-        try:
-            result_divs = driver.find_elements(
-                By.CSS_SELECTOR,
-                ".search-result, .result-item, .document-row, [class*='result']"
-            )
-            for div in result_divs:
-                text = div.text
-                if text.strip():
-                    doc = self._parse_result_text(text)
-                    if doc:
+            for row in rows[1:]:
+                cells = row.find_all("td")
+                if cells:
+                    doc = self._map_cells_to_doc(headers, cells)
+                    if doc.get("document_type") or doc.get("instrument_number"):
                         docs.append(doc)
-        except Exception:
-            pass
+            if docs:
+                return docs
+
+        # Strategy 2: Look for div-based results
+        result_divs = soup.find_all(
+            "div", class_=re.compile(r"result|search-result|document", re.I)
+        )
+        for div in result_divs:
+            text = div.get_text()
+            if text.strip():
+                doc = self._parse_result_text(text)
+                if doc:
+                    docs.append(doc)
+
+        # Strategy 3: Look for any structured data in definition lists
+        dl_elements = soup.find_all("dl")
+        for dl in dl_elements:
+            doc = {}
+            terms = dl.find_all("dt")
+            values = dl.find_all("dd")
+            for dt, dd in zip(terms, values):
+                key = dt.get_text(strip=True).lower()
+                val = dd.get_text(strip=True)
+                if "type" in key:
+                    doc["document_type"] = val
+                elif "date" in key or "record" in key:
+                    doc["recording_date"] = self._parse_date(val)
+                elif "instrument" in key:
+                    doc["instrument_number"] = val
+                elif "grantor" in key:
+                    doc["grantor"] = val
+                elif "grantee" in key:
+                    doc["grantee"] = val
+            if doc.get("document_type"):
+                docs.append(doc)
 
         return docs
-
-    def _extract_headers(self, header_row) -> list[str]:
-        """Extract column headers from the first table row."""
-        headers = []
-        for cell in header_row.find_elements(By.CSS_SELECTOR, "th, td"):
-            headers.append(cell.text.strip().lower())
-        return headers
 
     def _map_cells_to_doc(self, headers: list[str], cells) -> dict:
         """Map table cells to a document dict using header names."""
@@ -316,7 +363,7 @@ class ClarkCountyRecorderScraper(BaseRecorderScraper):
                 header = headers[i]
                 field = header_field_map.get(header)
                 if field:
-                    text = cell.text.strip()
+                    text = cell.get_text(strip=True)
                     if field == "recording_date":
                         doc[field] = self._parse_date(text)
                     elif field == "document_amount":
@@ -327,11 +374,11 @@ class ClarkCountyRecorderScraper(BaseRecorderScraper):
         # If no headers matched, try positional mapping (common AcclaimWeb layout)
         if not doc and len(cells) >= 4:
             doc = {
-                "recording_date": self._parse_date(cells[0].text.strip()),
-                "document_type": cells[1].text.strip() if len(cells) > 1 else "",
-                "grantor": cells[2].text.strip() if len(cells) > 2 else "",
-                "grantee": cells[3].text.strip() if len(cells) > 3 else "",
-                "instrument_number": cells[4].text.strip() if len(cells) > 4 else "",
+                "recording_date": self._parse_date(cells[0].get_text(strip=True)),
+                "document_type": cells[1].get_text(strip=True) if len(cells) > 1 else "",
+                "grantor": cells[2].get_text(strip=True) if len(cells) > 2 else "",
+                "grantee": cells[3].get_text(strip=True) if len(cells) > 3 else "",
+                "instrument_number": cells[4].get_text(strip=True) if len(cells) > 4 else "",
             }
 
         return doc
@@ -342,7 +389,6 @@ class ClarkCountyRecorderScraper(BaseRecorderScraper):
         lines = text.strip().split("\n")
         for line in lines:
             line = line.strip()
-            lower = line.lower()
             if ":" in line:
                 key, _, value = line.partition(":")
                 key = key.strip().lower()
@@ -380,33 +426,38 @@ class ClarkCountyRecorderScraper(BaseRecorderScraper):
         except ValueError:
             return None
 
-    def _has_next_page(self, driver) -> bool:
-        """Check if there's a next page of results."""
-        try:
-            next_links = driver.find_elements(
-                By.CSS_SELECTOR,
-                "a.next, a[rel='next'], .pagination .next:not(.disabled), "
-                "a[title='Next'], a[aria-label='Next'], .pager .next a"
-            )
-            return any(link.is_displayed() and link.is_enabled() for link in next_links)
-        except Exception:
-            return False
+    def _get_next_page_url(self, soup: BeautifulSoup) -> str | None:
+        """Find the URL for the next page of results."""
+        next_selectors = [
+            {"rel": "next"},
+            {"title": "Next"},
+            {"aria-label": "Next"},
+        ]
+        for attrs in next_selectors:
+            link = soup.find("a", attrs=attrs)
+            if link and link.get("href"):
+                href = link["href"]
+                if href.startswith("http"):
+                    return href
+                if href.startswith("/"):
+                    return f"https://recorderecomm.clarkcountynv.gov{href}"
+                return f"{self.base_url}/{href}"
 
-    def _click_next_page(self, driver):
-        """Click the next page link."""
-        next_links = driver.find_elements(
-            By.CSS_SELECTOR,
-            "a.next, a[rel='next'], .pagination .next a, "
-            "a[title='Next'], a[aria-label='Next'], .pager .next a"
-        )
-        for link in next_links:
-            if link.is_displayed() and link.is_enabled():
-                link.click()
-                return
-        raise RuntimeError("Next page link not clickable")
+        # Look for "Next" text in pagination links
+        for a in soup.find_all("a"):
+            if a.get_text(strip=True).lower() in ("next", "next »", "next >", "»"):
+                href = a.get("href")
+                if href:
+                    if href.startswith("http"):
+                        return href
+                    if href.startswith("/"):
+                        return f"https://recorderecomm.clarkcountynv.gov{href}"
+                    return f"{self.base_url}/{href}"
+
+        return None
 
     def close(self):
-        """Shut down the Selenium driver."""
-        if self._driver:
-            self._driver.quit()
-            self._driver = None
+        """Close the HTTP session."""
+        if self._session:
+            self._session.close()
+            self._session = None
