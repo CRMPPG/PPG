@@ -22,18 +22,45 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from ppg.scrapers.recorder_base import BaseRecorderScraper
 
-PARCEL_PATTERN = re.compile(r"^(\d{3})-?(\d{2})-?(\d{3})-?(\d{3})$")
+# Standard Clark County: XXX-XX-XXX-XXX (e.g. 179-34-712-030)
+PARCEL_STANDARD = re.compile(r"^(\d{3})-?(\d{2})-?(\d{3})-?(\d{3})$")
+# Older area parcels: XX-XXX-XX (e.g. 18-305-18) or XXX-XXX-XX (e.g. 003-132-22)
+PARCEL_SHORT = re.compile(r"^(\d{2,3})-(\d{2,4})-(\d{2,4})$")
+# Lettered prefix: X-XXXX-XXXX-XXXX (e.g. C-0645-0160-0000)
+PARCEL_LETTER = re.compile(r"^([A-Z])-(\d{4})-(\d{4})-(\d{4})$", re.I)
 
 
 def normalize_parcel(raw: str) -> str | None:
-    """Normalize a Clark County parcel number to XXX-XX-XXX-XXX format.
+    """Normalize a Clark County parcel number, preserving its original format.
 
-    Accepts formats: 139-16-813-026, 13916813026, 139 16 813 026
+    Accepts multiple Clark County formats:
+    - Standard: 179-34-712-030 or 17934712030
+    - Short: 18-305-18, 003-132-22
+    - Letter prefix: C-0645-0160-0000
     """
     cleaned = raw.strip().replace(" ", "").replace(".", "")
-    m = PARCEL_PATTERN.match(cleaned)
+    if not cleaned:
+        return None
+
+    # Standard 11-digit format
+    m = PARCEL_STANDARD.match(cleaned)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}-{m.group(4)}"
+
+    # Try undashed 11-digit
+    if re.match(r"^\d{11}$", cleaned):
+        return f"{cleaned[:3]}-{cleaned[3:5]}-{cleaned[5:8]}-{cleaned[8:11]}"
+
+    # Short format (already dashed)
+    m = PARCEL_SHORT.match(cleaned)
+    if m:
+        return cleaned  # keep as-is
+
+    # Letter prefix
+    m = PARCEL_LETTER.match(cleaned)
+    if m:
+        return cleaned.upper()
+
     return None
 
 

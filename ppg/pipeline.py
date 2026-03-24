@@ -96,7 +96,27 @@ def run_recorder_pipeline(
         normalize_parcel,
     )
 
-    listings = import_csv(listing_csv)
+    all_listings = import_csv(listing_csv)
+
+    # Filter to Clark County NV only (zip codes starting with 89)
+    CLARK_COUNTY_ZIPS = {"89"}
+    listings = []
+    skipped = 0
+    for listing in all_listings:
+        zip_code = str(listing.get("zip_code", ""))
+        if zip_code and not zip_code.startswith(tuple(CLARK_COUNTY_ZIPS)):
+            skipped += 1
+            continue
+        listings.append(listing)
+
+    if skipped:
+        print(f"  Skipped {skipped} non-Clark County properties")
+    print(f"  Processing {len(listings)} Clark County properties")
+
+    # Tag all as Clark County NV
+    for listing in listings:
+        listing.setdefault("county", "Clark")
+        listing.setdefault("state", "NV")
 
     # Normalize parcel numbers
     for listing in listings:

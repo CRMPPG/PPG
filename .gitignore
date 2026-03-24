@@ -9,6 +9,7 @@ build/
 .venv/
 venv/
 *.csv
+!data/*.csv
 *.xlsx
 .selenium/
 geckodriver.log
