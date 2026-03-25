@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PPG - Distressed Property Leads</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
+  .header { background: #1a1a2e; color: white; padding: 24px 32px; }
+  .header h1 { font-size: 24px; font-weight: 700; }
+  .header p { color: #aaa; margin-top: 4px; font-size: 14px; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+  .upload-area { border: 3px dashed #ccc; border-radius: 12px; padding: 60px 40px; text-align: center; background: white; cursor: pointer; transition: all .2s; margin-bottom: 24px; }
+  .upload-area:hover, .upload-area.dragover { border-color: #4361ee; background: #f0f4ff; }
+  .upload-area h2 { font-size: 20px; margin-bottom: 8px; }
+  .upload-area p { color: #777; font-size: 14px; }
+  .upload-area input[type=file] { display: none; }
+  .upload-btn { display: inline-block; margin-top: 16px; padding: 12px 32px; background: #4361ee; color: white; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; border: none; }
+  .upload-btn:hover { background: #3a56d4; }
+  .stats { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+  .stat-card { background: white; border-radius: 8px; padding: 16px 24px; flex: 1; min-width: 160px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  .stat-card .label { font-size: 12px; text-transform: uppercase; color: #777; font-weight: 600; }
+  .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .stat-card .value.red { color: #e63946; }
+  .stat-card .value.orange { color: #f77f00; }
+  .stat-card .value.green { color: #2d6a4f; }
+  .stat-card .value.blue { color: #4361ee; }
+  .controls { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+  .controls label { font-size: 14px; font-weight: 600; }
+  .controls select, .controls input { padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  .export-btn { padding: 8px 20px; background: #2d6a4f; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-left: auto; }
+  .export-btn:hover { background: #1b4332; }
+  .table-wrap { background: white; border-radius: 8px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { background: #f8f9fa; padding: 12px 16px; text-align: left; font-weight: 600; font-size: 12px; text-transform: uppercase; color: #555; border-bottom: 2px solid #dee2e6; white-space: nowrap; position: sticky; top: 0; cursor: pointer; user-select: none; }
+  th:hover { background: #e9ecef; }
+  th .sort-arrow { margin-left: 4px; color: #aaa; }
+  td { padding: 10px 16px; border-bottom: 1px solid #eee; }
+  tr:hover { background: #f8f9fa; }
+  .score-badge { display: inline-block; padding: 4px 10px; border-radius: 20px; font-weight: 700; font-size: 13px; min-width: 42px; text-align: center; }
+  .score-high { background: #fde8e8; color: #c0392b; }
+  .score-med { background: #fff3cd; color: #856404; }
+  .score-low { background: #d4edda; color: #155724; }
+  .flag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin: 1px 2px; background: #fee; color: #c0392b; white-space: nowrap; }
+  .flag.tax { background: #fff3cd; color: #856404; }
+  .flag.dom { background: #e8f4f8; color: #0c5460; }
+  .flag.vacant { background: #f3e8ff; color: #6f42c1; }
+  td.addr { font-weight: 600; }
+  td.price { white-space: nowrap; }
+  .hidden { display: none; }
+  #results { display: none; }
+  .empty-msg { text-align: center; padding: 40px; color: #777; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>PPG Lead Finder</h1>
+  <p>Upload your MLS export CSV &mdash; get a ranked call list of distressed properties</p>
+</div>
+<div class="container">
+  <div class="upload-area" id="dropZone">
+    <h2>Drop your CSV file here</h2>
+    <p>or click to browse. Supports MLS exports, assessor data, and tab-delimited files.</p>
+    <button class="upload-btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
+    <input type="file" id="fileInput" accept=".csv,.tsv,.txt">
+  </div>
+  <div id="results">
+    <div class="stats">
+      <div class="stat-card"><div class="label">Total Properties</div><div class="value blue" id="statTotal">0</div></div>
+      <div class="stat-card"><div class="label">High Distress (60+)</div><div class="value red" id="statHigh">0</div></div>
+      <div class="stat-card"><div class="label">Medium (30-59)</div><div class="value orange" id="statMed">0</div></div>
+      <div class="stat-card"><div class="label">Low (&lt;30)</div><div class="value green" id="statLow">0</div></div>
+    </div>
+    <div class="controls">
+      <label>Show top</label>
+      <select id="topN">
+        <option value="10">10</option>
+        <option value="25" selected>25</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+        <option value="99999">All</option>
+      </select>
+      <label>Min score</label>
+      <input type="number" id="minScore" value="0" min="0" max="100" style="width:70px">
+      <button class="export-btn" onclick="exportCSV()">Export CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr id="tableHead"></tr></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script>
+const COLUMN_MAP=[[/^address$|street|situs/i,"address"],[/^city$/i,"city"],[/^state$/i,"state"],[/zip|postal/i,"zip_code"],[/county/i,"county"],[/parcel|apn|pin|tax.?id/i,"parcel_number"],[/prop.?type|land.?use|class|^sub$/i,"property_type"],[/bed/i,"bedrooms"],[/bath/i,"bathrooms"],[/sq.?ft|liv(ing)?.?area|heated|approx.?liv/i,"sqft"],[/lot.?(size|area|sq)/i,"lot_size_sqft"],[/year.?built/i,"year_built"],[/(list|ask|current).?price/i,"list_price"],[/^dom$|days.?on.?market/i,"days_on_market"],[/^stat$|status|listing.?status/i,"listing_status"],[/^mls$|mls.?(num|#|id)/i,"listing_source"],[/assess.*(val|worth)/i,"assessed_value"],[/land.?val/i,"assessed_land_value"],[/market.?val/i,"market_value"],[/tax.?(amount|due|total)/i,"annual_tax_amount"],[/delinq/i,"tax_delinquent"],[/lien/i,"has_liens"],[/foreclos/i,"in_foreclosure"],[/bank.?own|reo/i,"is_bank_owned"],[/vacant/i,"is_vacant"],[/code.?viol/i,"code_violations"],[/owner.?occ/i,"owner_occupied"]];
+const CURRENCY=new Set(["list_price","assessed_value","assessed_land_value","assessed_improvement_value","market_value","annual_tax_amount"]);
+const INTS=new Set(["bedrooms","sqft","lot_size_sqft","year_built","days_on_market","code_violations"]);
+const FLOATS=new Set(["bathrooms"]);
+const BOOLS=new Set(["tax_delinquent","has_liens","in_foreclosure","is_bank_owned","is_vacant","owner_occupied"]);
+function matchColumn(col){const l=col.trim().toLowerCase();for(const[re,field]of COLUMN_MAP){if(re.test(l))return field;}return null;}
+function parseValue(field,raw){if(raw==null)return null;raw=raw.trim();if(!raw||["n/a","none","null","-"].includes(raw.toLowerCase()))return null;if(CURRENCY.has(field)){const c=raw.replace(/[^\d.]/g,"");return c?parseFloat(c):null;}if(INTS.has(field)){const m=raw.replace(/,/g,"").match(/(\d+)/);return m?parseInt(m[1]):null;}if(FLOATS.has(field)){const m=raw.match(/(\d+\.?\d*)/);return m?parseFloat(m[1]):null;}if(BOOLS.has(field))return["true","yes","y","1","x"].includes(raw.toLowerCase());return raw;}
+function parseCSV(text){const firstLine=text.split(/\r?\n/)[0];const delim=(firstLine.split("\t").length>firstLine.split(",").length)?"\t":",";const lines=[];let current="";let inQuotes=false;for(let i=0;i<text.length;i++){const ch=text[i];if(ch==='"'){if(inQuotes&&text[i+1]==='"'){current+='"';i++;}else inQuotes=!inQuotes;}else if((ch==='\n'||ch==='\r')&&!inQuotes){if(current.length>0)lines.push(current);current="";if(ch==='\r'&&text[i+1]==='\n')i++;}else{current+=ch;}}if(current.length>0)lines.push(current);if(lines.length<2)return[];function splitLine(line){const cols=[];let cur="";let inQ=false;for(let i=0;i<line.length;i++){const c=line[i];if(c==='"'){if(inQ&&line[i+1]==='"'){cur+='"';i++;}else inQ=!inQ;}else if(c===delim&&!inQ){cols.push(cur);cur="";}else cur+=c;}cols.push(cur);return cols;}const headers=splitLine(lines[0]);if(headers[0])headers[0]=headers[0].replace(/^\uFEFF/,"");const colMap={};headers.forEach((h,i)=>{const f=matchColumn(h);if(f)colMap[i]=f;});const records=[];for(let r=1;r<lines.length;r++){const vals=splitLine(lines[r]);const rec={};for(const[idx,field]of Object.entries(colMap)){const v=parseValue(field,vals[idx]||"");if(v!=null)rec[field]=v;}if(rec.address||rec.parcel_number)records.push(rec);}return records;}
+function scoreProperty(p){const b={tax:0,price:0,foreclosure:0,docs:0,lien:0,vacancy:0,violations:0,dom:0,total:0};if(p.tax_delinquent){b.tax=12;const years=p.tax_delinquent_years||0;b.tax+=Math.min(years*2,8);}const listPrice=p.list_price;const assessed=p.assessed_value||p.market_value;if(listPrice&&assessed&&assessed>0){const ratio=listPrice/assessed;p.price_to_assessed_ratio=Math.round(ratio*1000)/1000;if(ratio<0.7)b.price=15;else if(ratio<1.0)b.price=Math.min((1.0-ratio)*100*0.5,15);}if(p.in_foreclosure)b.foreclosure+=7;if(p.is_bank_owned)b.foreclosure+=3;b.foreclosure=Math.min(b.foreclosure,10);if(p.notice_of_default)b.docs+=8;if(p.lis_pendens)b.docs+=6;if(p.trustee_sale_scheduled)b.docs+=6;b.docs=Math.min(b.docs,20);if(p.has_liens){b.lien=5;const amt=p.lien_amount||0;if(amt>50000)b.lien=10;else if(amt>10000)b.lien=8;else if(amt>0)b.lien=6;}if(p.is_vacant)b.vacancy=10;else if(p.owner_occupied===false)b.vacancy=3;const viol=p.code_violations||0;if(viol>0)b.violations=Math.min(viol*2,5);const dom=p.days_on_market||0;if(dom>180)b.dom=10;else if(dom>120)b.dom=7;else if(dom>90)b.dom=5;else if(dom>60)b.dom=3;b.total=Math.round((b.tax+b.price+b.foreclosure+b.docs+b.lien+b.vacancy+b.violations+b.dom)*10)/10;p.distress_score=b.total;p._breakdown=b;return p;}
+function rankProperties(records){records.forEach(scoreProperty);return records.sort((a,b)=>(b.distress_score||0)-(a.distress_score||0));}
+let allProperties=[];let sortCol="distress_score";let sortDir=-1;
+const COLUMNS=[{key:"_rank",label:"#",fmt:v=>v},{key:"distress_score",label:"Score",fmt:v=>v!=null?v.toFixed(1):"0"},{key:"address",label:"Address",fmt:v=>v||""},{key:"city",label:"City",fmt:v=>v||""},{key:"zip_code",label:"Zip",fmt:v=>v||""},{key:"list_price",label:"List Price",fmt:v=>v?"$"+v.toLocaleString("en-US",{maximumFractionDigits:0}):"-"},{key:"assessed_value",label:"Assessed",fmt:v=>v?"$"+v.toLocaleString("en-US",{maximumFractionDigits:0}):"-"},{key:"price_to_assessed_ratio",label:"Ratio",fmt:v=>v?v.toFixed(2):"-"},{key:"days_on_market",label:"DOM",fmt:v=>v!=null?v:"-"},{key:"sqft",label:"SqFt",fmt:v=>v?v.toLocaleString():"-"},{key:"bedrooms",label:"Beds",fmt:v=>v!=null?v:"-"},{key:"bathrooms",label:"Baths",fmt:v=>v!=null?v:"-"},{key:"year_built",label:"Year",fmt:v=>v||"-"},{key:"_flags",label:"Distress Flags",fmt:v=>v}];
+function getFlags(p){const flags=[];if(p.notice_of_default)flags.push({t:"NOD",c:"flag"});if(p.lis_pendens)flags.push({t:"LIS PENDENS",c:"flag"});if(p.trustee_sale_scheduled)flags.push({t:"TRUSTEE SALE",c:"flag"});if(p.tax_delinquent)flags.push({t:"TAX DELINQ",c:"flag tax"});if(p.in_foreclosure&&!p.notice_of_default)flags.push({t:"FORECLOSURE",c:"flag"});if(p.is_bank_owned)flags.push({t:"REO",c:"flag"});if(p.has_liens)flags.push({t:"LIENS",c:"flag"});if(p.is_vacant)flags.push({t:"VACANT",c:"flag vacant"});if((p.days_on_market||0)>90)flags.push({t:"STALE "+p.days_on_market+"d",c:"flag dom"});if((p.code_violations||0)>0)flags.push({t:"VIOLATIONS("+p.code_violations+")",c:"flag"});return flags;}
+function render(){const topN=parseInt(document.getElementById("topN").value);const minScore=parseFloat(document.getElementById("minScore").value)||0;let filtered=allProperties.filter(p=>(p.distress_score||0)>=minScore);filtered.sort((a,b)=>{let va=a[sortCol],vb=b[sortCol];if(va==null)va=sortDir===-1?-Infinity:Infinity;if(vb==null)vb=sortDir===-1?-Infinity:Infinity;if(typeof va==="string")return sortDir*va.localeCompare(vb);return sortDir*(va-vb);});const showing=filtered.slice(0,topN);document.getElementById("statTotal").textContent=allProperties.length;document.getElementById("statHigh").textContent=allProperties.filter(p=>(p.distress_score||0)>=60).length;document.getElementById("statMed").textContent=allProperties.filter(p=>{const s=p.distress_score||0;return s>=30&&s<60;}).length;document.getElementById("statLow").textContent=allProperties.filter(p=>(p.distress_score||0)<30).length;const thead=document.getElementById("tableHead");thead.innerHTML="";for(const col of COLUMNS){const th=document.createElement("th");th.textContent=col.label;if(sortCol===col.key){const arrow=document.createElement("span");arrow.className="sort-arrow";arrow.textContent=sortDir===-1?" \u25BC":" \u25B2";th.appendChild(arrow);}if(col.key!=="_rank"&&col.key!=="_flags"){th.onclick=()=>{if(sortCol===col.key)sortDir*=-1;else{sortCol=col.key;sortDir=-1;}render();};}thead.appendChild(th);}const tbody=document.getElementById("tableBody");tbody.innerHTML="";if(showing.length===0){const tr=document.createElement("tr");const td=document.createElement("td");td.colSpan=COLUMNS.length;td.className="empty-msg";td.textContent="No properties match your filters.";tr.appendChild(td);tbody.appendChild(tr);return;}showing.forEach((p,i)=>{const tr=document.createElement("tr");for(const col of COLUMNS){const td=document.createElement("td");if(col.key==="_rank"){td.textContent=i+1;td.style.color="#999";}else if(col.key==="_flags"){const flags=getFlags(p);if(flags.length===0){td.textContent="-";td.style.color="#999";}else flags.forEach(f=>{const s=document.createElement("span");s.className=f.c;s.textContent=f.t;td.appendChild(s);});}else if(col.key==="distress_score"){const s=p.distress_score||0;const span=document.createElement("span");span.className="score-badge "+(s>=60?"score-high":s>=30?"score-med":"score-low");span.textContent=col.fmt(s);td.appendChild(span);}else if(col.key==="address"){td.className="addr";td.textContent=col.fmt(p[col.key]);}else if(col.key==="list_price"||col.key==="assessed_value"){td.className="price";td.textContent=col.fmt(p[col.key]);}else{td.textContent=col.fmt(p[col.key]);}tr.appendChild(td);}tbody.appendChild(tr);});}
+function exportCSV(){const minScore=parseFloat(document.getElementById("minScore").value)||0;const filtered=allProperties.filter(p=>(p.distress_score||0)>=minScore);const fields=["address","city","state","zip_code","parcel_number","property_type","bedrooms","bathrooms","sqft","year_built","list_price","assessed_value","market_value","price_to_assessed_ratio","days_on_market","tax_delinquent","has_liens","in_foreclosure","is_bank_owned","is_vacant","code_violations","distress_score"];const esc=v=>{const s=String(v??"");return s.includes(",")||s.includes('"')?'"'+s.replace(/"/g,'""')+'"':s;};let csv=fields.join(",")+"\n";for(const p of filtered){csv+=fields.map(f=>esc(p[f])).join(",")+"\n";}const blob=new Blob([csv],{type:"text/csv"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="ppg_leads_"+new Date().toISOString().slice(0,10)+".csv";a.click();}
+function handleFile(file){const reader=new FileReader();reader.onload=function(e){const text=e.target.result;const records=parseCSV(text);allProperties=rankProperties(records);document.getElementById("results").style.display="block";document.getElementById("dropZone").innerHTML='<p style="color:#2d6a4f;font-weight:600">Loaded: '+file.name+' ('+allProperties.length+' properties)</p><button class="upload-btn" onclick="document.getElementById(\'fileInput\').click()">Load Different File</button><input type="file" id="fileInput" accept=".csv,.tsv,.txt" style="display:none">';document.getElementById("fileInput").addEventListener("change",function(e){if(e.target.files[0])handleFile(e.target.files[0]);});render();};reader.readAsText(file);}
+const dropZone=document.getElementById("dropZone");dropZone.addEventListener("dragover",e=>{e.preventDefault();dropZone.classList.add("dragover");});dropZone.addEventListener("dragleave",()=>dropZone.classList.remove("dragover"));dropZone.addEventListener("drop",e=>{e.preventDefault();dropZone.classList.remove("dragover");if(e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0]);});document.getElementById("fileInput").addEventListener("change",e=>{if(e.target.files[0])handleFile(e.target.files[0]);});
+document.getElementById("topN").addEventListener("change",render);document.getElementById("minScore").addEventListener("input",render);
+</script>
+</body>
+</html>
