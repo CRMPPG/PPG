@@ -9,6 +9,11 @@ from rich.console import Console
 from rich.table import Table
 
 from ppg.analysis.distress_scorer import rank_properties, score_property
+from ppg.analysis.flip_calculator import (
+    FlipAssumptions,
+    analyze_flip_from_csv,
+    calculate_flip,
+)
 from ppg.models.database import init_db, get_session, Property
 from ppg.pipeline import run_csv_pipeline, run_recorder_pipeline, run_scraper_pipeline
 from ppg.scrapers.csv_import import import_csv
@@ -175,6 +180,136 @@ def report(db, min_score, top):
         })
 
     _display_results(records)
+
+
+@cli.command()
+@click.argument("csv_file", type=click.Path(exists=True), required=False)
+@click.option("--purchase-price", type=float, help="Purchase price ($)")
+@click.option("--arv", type=float, help="After Repair Value ($)")
+@click.option("--rehab", type=float, default=0, help="Rehab / repair budget ($)")
+@click.option("--holding-months", type=int, default=6, help="Holding period in months")
+@click.option("--interest-rate", type=float, default=10.0, help="Annual interest rate (%)")
+@click.option("--ltv", type=float, default=80.0, help="Loan-to-value (%)")
+@click.option("--loan-points", type=float, default=2.0, help="Origination points (%)")
+@click.option("--agent-commission", type=float, default=5.0, help="Total agent commission (%)")
+@click.option("--monthly-insurance", type=float, default=150.0, help="Monthly insurance ($)")
+@click.option("--monthly-utilities", type=float, default=200.0, help="Monthly utilities ($)")
+@click.option("--monthly-hoa", type=float, default=0.0, help="Monthly HOA ($)")
+@click.option("--top", default=20, help="Show top N results (CSV mode)")
+@click.option("--export", type=click.Path(), help="Export results to CSV")
+def flip(
+    csv_file, purchase_price, arv, rehab,
+    holding_months, interest_rate, ltv, loan_points,
+    agent_commission, monthly_insurance, monthly_utilities, monthly_hoa,
+    top, export,
+):
+    """Fix-and-flip deal calculator.
+
+    Two modes:
+
+    \b
+    1) Single deal:  ppg flip --purchase-price 200000 --arv 320000 --rehab 45000
+    2) Batch CSV:    ppg flip deals.csv  (CSV needs purchase_price/list_price, arv, rehab_cost columns)
+
+    Calculates profit, ROI, and MAO (Maximum Allowable Offer) for each deal.
+    """
+    assumptions = FlipAssumptions(
+        holding_months=holding_months,
+        annual_interest_rate=interest_rate / 100,
+        loan_to_value=ltv / 100,
+        loan_points=loan_points,
+        agent_commission_pct=agent_commission / 100,
+        monthly_insurance=monthly_insurance,
+        monthly_utilities=monthly_utilities,
+        monthly_hoa=monthly_hoa,
+    )
+
+    if csv_file:
+        # --- Batch CSV mode ---
+        records = import_csv(csv_file)
+        results = analyze_flip_from_csv(records, assumptions=assumptions)
+        viable = [r for r in results if r.get("flip_net_profit") is not None]
+        console.print(
+            f"\n[bold green]Analyzed {len(viable)} deals from {csv_file}[/bold green]\n"
+        )
+        _display_flip_results(viable[:top])
+        if export:
+            _export_flip_csv(viable, export)
+            console.print(f"\n[bold]Exported {len(viable)} deals to {export}[/bold]")
+    elif purchase_price and arv:
+        # --- Single deal mode ---
+        breakdown = calculate_flip(purchase_price, arv, rehab, assumptions=assumptions)
+        console.print("\n[bold]Fix & Flip Analysis[/bold]\n")
+        for line in breakdown.summary_lines:
+            console.print(f"  {line}")
+        console.print()
+        if breakdown.is_profitable:
+            console.print("[bold green]DEAL LOOKS PROFITABLE[/bold green]")
+        else:
+            console.print("[bold red]DEAL IS NOT PROFITABLE at this price[/bold red]")
+        if purchase_price > breakdown.mao:
+            console.print(
+                f"[yellow]Purchase price is ${purchase_price - breakdown.mao:,.0f} "
+                f"above MAO — negotiate lower or walk away.[/yellow]"
+            )
+        console.print()
+    else:
+        console.print(
+            "[red]Provide either a CSV file or --purchase-price and --arv.[/red]\n"
+            "Run [bold]ppg flip --help[/bold] for usage."
+        )
+
+
+def _display_flip_results(deals: list[dict]):
+    """Render a rich table of flip analysis results."""
+    table = Table(title="Fix & Flip Analysis (ranked by profit)", show_lines=True)
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Address", min_width=20)
+    table.add_column("Purchase", justify="right")
+    table.add_column("ARV", justify="right")
+    table.add_column("Rehab", justify="right")
+    table.add_column("Total Cost", justify="right")
+    table.add_column("Net Profit", justify="right", style="bold")
+    table.add_column("ROI %", justify="right")
+    table.add_column("MAO", justify="right")
+
+    for i, deal in enumerate(deals, 1):
+        profit = deal.get("flip_net_profit", 0) or 0
+        profit_style = "green" if profit > 0 else "red"
+        roi = deal.get("flip_roi_pct", 0) or 0
+        purchase = deal.get("flip_purchase_price") or deal.get("purchase_price") or deal.get("list_price")
+        arv_val = deal.get("flip_arv") or deal.get("arv")
+        rehab_val = deal.get("flip_rehab_cost") or deal.get("rehab_cost") or deal.get("rehab") or 0
+
+        table.add_row(
+            str(i),
+            deal.get("address", "N/A"),
+            f"${purchase:,.0f}" if purchase else "-",
+            f"${arv_val:,.0f}" if arv_val else "-",
+            f"${rehab_val:,.0f}" if rehab_val else "-",
+            f"${deal.get('flip_total_project_cost', 0):,.0f}",
+            f"[{profit_style}]${profit:,.0f}[/{profit_style}]",
+            f"{roi:.1f}%",
+            f"${deal.get('flip_mao', 0):,.0f}",
+        )
+
+    console.print(table)
+
+
+def _export_flip_csv(deals: list[dict], filepath: str):
+    """Export flip analysis results to CSV."""
+    if not deals:
+        return
+    export_fields = [
+        "address", "city", "state", "zip_code",
+        "flip_purchase_price", "flip_arv", "flip_rehab_cost",
+        "flip_total_project_cost", "flip_net_profit", "flip_roi_pct", "flip_mao",
+        "distress_score",
+    ]
+    with open(filepath, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=export_fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(deals)
 
 
 def _display_results(properties: list[dict]):
